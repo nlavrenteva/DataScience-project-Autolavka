@@ -72,6 +72,7 @@ def estimate_has_shop(df):
     prob = 1 / (1 + np.exp(-logits))
     return (rng.random(len(df)) < prob).astype(int)
 
+df = load_data(RAW_PATH)
 df = clean_data(df)
 df = fill_population(df)
 
