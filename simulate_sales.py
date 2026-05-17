@@ -1,4 +1,3 @@
-!pip install lightgbm
 import numpy as np
 import pandas as pd
 
@@ -79,10 +78,10 @@ def aggregate_by_village(sales_df):
 
     return grouped
 
-villages_df = pd.read_csv("data/villages.csv")
+villages_df = pd.read_csv("villages.csv")
 sales_history = simulate_sales(villages_df, trips_count=8)
 village_summary = aggregate_by_village(sales_history)
-village_summary.to_csv("data/village_revenue.csv", index=False)
+village_summary.to_csv("village_revenue.csv", index=False)
 print("\nСтатистика выручки:")
 print(village_summary["avg_revenue"].describe().round(0))
 print("\nТоп-5 деревень по средней выручке:")
