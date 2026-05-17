@@ -15,17 +15,17 @@ FEATURES = [
 ]
 
 def load_data():
-    villages = pd.read_csv('data/villages.csv')
-    revenue = pd.read_csv('data/village_revenue.csv')
+    villages = pd.read_csv('villages.csv')
+    revenue = pd.read_csv('village_revenue.csv')
     data = villages.merge(revenue, on='village')
     X = data[FEATURES]
     y = data['avg_revenue']
     return data, X, y
 
 def print_data_info(y):
-    print(f"Средняя выручка: {y.mean():.0f} ₽")
-    print(f"Медиана: {y.median():.0f} ₽")
-    print(f"Диапазон: {y.min():.0f} – {y.max():.0f} ₽")
+    print(f"Средняя выручка: {y.mean():.0f}")
+    print(f"Медиана: {y.median():.0f}")
+    print(f"Диапазон: {y.min():.0f} – {y.max():.0f}")
     print(f"Перекос распределения: {y.skew():.1f}")
     print()
 
@@ -45,7 +45,7 @@ def check_baseline(X, y):
     mae = -cross_val_score(dummy, X, y, cv=5, scoring='neg_mean_absolute_error')
     r2 = cross_val_score(dummy, X, y, cv=5, scoring='r2')
     print('Baseline:')
-    print(f'MAE: {mae.mean():.0f} ± {mae.std():.0f} ₽')
+    print(f'MAE: {mae.mean():.0f}')
     print(f'R квадрат: {r2.mean():.3f}')
     print()
     return mae.mean()
@@ -67,8 +67,8 @@ def cross_validate_model(X, y):
         r2_list.append(r2_score(y_test, pred))
 
     print('LightGBM cross-validation:')
-    print(f'MAE: {np.mean(mae_list):.0f} ± {np.std(mae_list):.0f} ₽')
-    print(f'R²:  {np.mean(r2_list):.3f} ± {np.std(r2_list):.3f}')
+    print(f'MAE:{np.mean(mae_list):.0f}')
+    print(f'R квадрат: {np.mean(r2_list):.3f}')
     print()
     return np.mean(mae_list)
 
@@ -82,9 +82,8 @@ def check_holdout(X, y):
     pred_log = model.predict(X_test)
     pred = np.clip(np.expm1(pred_log), 0, None)
     y_test = np.expm1(y_test_log)
-    print('Holdout test:')
-    print(f'MAE: {mean_absolute_error(y_test, pred):.0f} ₽')
-    print(f'RMSE: {np.sqrt(mean_squared_error(y_test, pred)):.0f} ₽')
+    print(f'MAE: {mean_absolute_error(y_test, pred):.0f}')
+    print(f'RMSE: {np.sqrt(mean_squared_error(y_test, pred)):.0f}')
     print(f'R квадрат: {r2_score(y_test, pred):.3f}')
     print()
     return model
@@ -114,7 +113,7 @@ def save_forecast(df, X, y):
     ]]
 
     output = output.sort_values('predicted_revenue', ascending=False)
-    output.to_csv('data/demand_forecast.csv', index=False)
+    output.to_csv('demand_forecast.csv', index=False)
     print('Топ 10 деревень по прогнозируемой выручке:')
     print(output.head(10).to_string(index=False))
 
@@ -126,7 +125,7 @@ base_mae = check_baseline(X, y)
 model_mae = cross_validate_model(X, y)
 improve = 1 - model_mae / base_mae
 
-print(f'Улучшение MAE: {base_mae - model_mae:.0f} ₽')
+print(f'Улучшение MAE: {base_mae - model_mae:.0f}')
 print(f'Улучшение в процентах: {improve * 100:.0f}%')
 final_model = check_holdout(X, y)
 print_feature_importance(final_model)
