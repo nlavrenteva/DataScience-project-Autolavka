@@ -1,0 +1,328 @@
+import csv
+import argparse
+from dataclasses import dataclass
+from pathlib import Path
+ 
+ 
+# Сколько человек обычно живёт в деревне, если в нет точных данных.
+POP_BY_TYPE = {
+    "village": 80,
+    "hamlet": 15,
+    "isolated_dwelling": 3,
+}
+ 
+ 
+@dataclass
+class Product:
+    name: str
+    category: str
+    annual: float       # годовая норма на одного жителя (кг, л или шт.)
+    unit: str           # "кг", "л", "шт", "буханка"
+    price: float        # закупочная цена за единицу, руб
+    weight: float       # сколько весит одна единица, кг (для загрузки фургона)
+    rural: float = 1.0  # поправка на село: 0.2 = берут в 5 раз меньше (своё с огорода), 1.2 = берут больше (негде купить альтернативу)
+ 
+    @property
+    def adjusted_annual(self) -> float:
+        return self.annual * self.rural
+ 
+ 
+@dataclass
+class Village:
+    name: str
+    place_type: str
+    region: str
+    district: str
+    population: int
+ 
+    @classmethod
+    def from_route_row(cls, row: dict) -> "Village":
+        place = (row.get("Тип") or "village").strip()
+        return cls(
+            name=row.get("Название", "").strip(),
+            place_type=place,
+            region=row.get("Регион", "").strip(),
+            district=row.get("Район", "").strip(),
+            population=POP_BY_TYPE.get(place, 30),
+        )
+ 
+ 
+@dataclass
+class BasketParams:
+    frequency_days: int = 7   # раз в сколько дней приезжаем
+    reach: float = 0.30       # доля жителей, которая реально покупает
+    margin: float = 0.25      # торговая наценка
+    waste: float = 0.10       # запас на порчу и неучтённый спрос
+ 
+    @property
+    def cycle_fraction(self) -> float:
+        return self.frequency_days / 365
+ 
+ 
+BASKET = [
+    # Хлеб и крупы
+    Product("Хлеб ржано-пшеничный",   "Хлеб и крупы", 95,  "буханка", 45,  0.6,  rural=1.0),
+    Product("Мука пшеничная",          "Хлеб и крупы", 9,   "кг",      55,  1.0,  rural=0.7),
+    Product("Макароны",                "Хлеб и крупы", 6,   "кг",      90,  0.5,  rural=1.0),
+    Product("Гречка",                  "Хлеб и крупы", 4,   "кг",      110, 0.9,  rural=1.0),
+    Product("Рис",                     "Хлеб и крупы", 4,   "кг",      95,  0.9,  rural=1.0),
+    Product("Пшено / овсянка",         "Хлеб и крупы", 3,   "кг",      75,  0.9,  rural=1.0),
+    Product("Сахар",                   "Хлеб и крупы", 24,  "кг",      70,  1.0,  rural=1.0),
+    Product("Соль",                    "Хлеб и крупы", 4,   "кг",      25,  1.0,  rural=1.0),
+ 
+    # Молочка — у многих свои коровы, но не у всех
+    Product("Молоко 2.5% (1л)",        "Молочное", 80,  "л",  75,  1.03, rural=0.5),
+    Product("Кефир (0.9л)",            "Молочное", 18,  "шт", 80,  0.93, rural=0.7),
+    Product("Сметана (350г)",          "Молочное", 12,  "шт", 95,  0.35, rural=0.7),
+    Product("Творог (200г)",           "Молочное", 15,  "шт", 85,  0.20, rural=0.7),
+    Product("Сыр",                     "Молочное", 4,   "кг", 650, 1.0,  rural=0.8),
+    Product("Масло сливочное (180г)",  "Молочное", 18,  "шт", 180, 0.18, rural=0.9),
+ 
+    # Мясо, рыба, яйца
+    Product("Курица",                  "Мясо и рыба", 13,  "кг", 280, 1.5,  rural=0.7),
+    Product("Колбаса варёная",         "Мясо и рыба", 5,   "кг", 450, 0.5,  rural=1.0),
+    Product("Сосиски",                 "Мясо и рыба", 4,   "кг", 420, 0.5,  rural=1.0),
+    Product("Тушёнка (325г)",          "Мясо и рыба", 8,   "шт", 180, 0.33, rural=1.1),
+    Product("Рыбные консервы",         "Мясо и рыба", 10,  "шт", 130, 0.25, rural=1.2),
+    Product("Селёдка",                 "Мясо и рыба", 6,   "шт", 150, 0.4,  rural=1.0),
+    Product("Яйцо (десяток)",          "Мясо и рыба", 24,  "шт", 110, 0.65, rural=0.5),
+ 
+    # Овощи и фрукты — картошку и лук выращивают сами
+    Product("Картофель",               "Овощи и фрукты", 95, "кг", 45,  1.0, rural=0.2),
+    Product("Лук",                     "Овощи и фрукты", 11, "кг", 50,  1.0, rural=0.4),
+    Product("Морковь",                 "Овощи и фрукты", 10, "кг", 55,  1.0, rural=0.4),
+    Product("Капуста",                 "Овощи и фрукты", 12, "кг", 40,  1.0, rural=0.4),
+    Product("Бананы",                  "Овощи и фрукты", 8,  "кг", 130, 1.0, rural=1.2),
+    Product("Яблоки",                  "Овощи и фрукты", 14, "кг", 120, 1.0, rural=0.5),
+    Product("Лимоны",                  "Овощи и фрукты", 2,  "кг", 220, 1.0, rural=1.0),
+ 
+    # Бакалея
+    Product("Масло подсолнечное (1л)", "Бакалея", 11, "л",  140, 0.95, rural=1.0),
+    Product("Чай (100г)",              "Бакалея", 4,  "шт", 180, 0.10, rural=1.0),
+    Product("Кофе (95г)",              "Бакалея", 2,  "шт", 320, 0.10, rural=1.0),
+    Product("Печенье",                 "Бакалея", 6,  "кг", 220, 0.5,  rural=1.1),
+    Product("Конфеты",                 "Бакалея", 3,  "кг", 380, 0.5,  rural=1.0),
+ 
+    # Хозтовары — в деревне часто негде купить, лавка их заменяет
+    Product("Спички (10 пач.)",        "Хозтовары", 2,  "шт", 30,  0.05, rural=1.0),
+    Product("Мыло хозяйственное",      "Хозтовары", 5,  "шт", 45,  0.20, rural=1.0),
+    Product("Мыло туалетное",          "Хозтовары", 6,  "шт", 55,  0.10, rural=1.0),
+    Product("Стиральный порошок (3кг)","Хозтовары", 2,  "шт", 380, 3.0,  rural=1.0),
+    Product("Зубная паста",            "Хозтовары", 3,  "шт", 120, 0.10, rural=1.0),
+    Product("Туалетная бумага (4 рул.)","Хозтовары",10, "шт", 90,  0.30, rural=1.0),
+    Product("Батарейки AA (4 шт)",     "Хозтовары", 2,  "шт", 150, 0.10, rural=1.0),
+    Product("Бинт, пластырь, анальгин","Хозтовары", 3,  "шт", 80,  0.10, rural=1.0),
+]
+ 
+ 
+def load_route(path: str) -> list[Village]:
+    villages = []
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if not row.get("Название", "").strip():
+                continue
+            villages.append(Village.from_route_row(row))
+    return villages
+ 
+ 
+def village_basket(village: Village, params: BasketParams) -> list[dict]:
+    buyers = village.population * params.reach
+    items = []
+    for p in BASKET:
+        qty = p.adjusted_annual * params.cycle_fraction * buyers
+        if qty < 0.05:
+            continue
+        items.append({
+            "product": p.name,
+            "category": p.category,
+            "unit": p.unit,
+            "qty": round(qty, 2),
+            "weight": round(qty * p.weight, 2),
+            "cost": round(qty * p.price, 2),
+        })
+    return items
+ 
+ 
+def total_for_van(villages: list[Village], params: BasketParams) -> list[dict]:
+    totals: dict[str, dict] = {}
+    for v in villages:
+        for item in village_basket(v, params):
+            name = item["product"]
+            if name not in totals:
+                totals[name] = {
+                    "product": name,
+                    "category": item["category"],
+                    "unit": item["unit"],
+                    "qty": 0,
+                    "weight": 0,
+                    "cost": 0,
+                }
+            totals[name]["qty"] += item["qty"]
+            totals[name]["weight"] += item["weight"]
+            totals[name]["cost"] += item["cost"]
+ 
+    # запас на порчу и неучтённый спрос
+    for t in totals.values():
+        t["qty"] = round(t["qty"] * (1 + params.waste), 2)
+        t["weight"] = round(t["weight"] * (1 + params.waste), 2)
+        t["cost"] = round(t["cost"] * (1 + params.waste), 2)
+        t["revenue"] = round(t["cost"] * (1 + params.margin), 2)
+        t["profit"] = round(t["revenue"] - t["cost"], 2)
+ 
+    return sorted(totals.values(), key=lambda x: (x["category"], -x["cost"]))
+ 
+ 
+def save_van_load(rows: list[dict], path: Path,
+                  villages: list[Village], params: BasketParams) -> None:
+    total_weight = sum(r["weight"] for r in rows)
+    total_cost = sum(r["cost"] for r in rows)
+    total_revenue = sum(r["revenue"] for r in rows)
+    total_pop = sum(v.population for v in villages)
+ 
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["Категория", "Товар", "Кол-во", "Ед.",
+                    "Вес, кг", "Закупка, ₽", "Выручка, ₽", "Прибыль, ₽"])
+        for r in rows:
+            w.writerow([r["category"], r["product"], r["qty"], r["unit"],
+                        r["weight"], r["cost"], r["revenue"], r["profit"]])
+ 
+        w.writerow([])
+        w.writerow(["ИТОГО", "", "", "",
+                    round(total_weight, 1),
+                    round(total_cost),
+                    round(total_revenue),
+                    round(total_revenue - total_cost)])
+        w.writerow([])
+        w.writerow([f"Маршрут: {len(villages)} деревень, ~{total_pop} жителей, "
+                    f"охват {int(params.reach * 100)}%, "
+                    f"завоз раз в {params.frequency_days} дн., "
+                    f"наценка {int(params.margin * 100)}%"])
+ 
+ 
+def save_per_village(villages: list[Village], path: Path,
+                     params: BasketParams) -> None:
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["Деревня", "Район", "Тип", "Население",
+                    "Категория", "Товар", "Кол-во", "Ед.", "Выручка, ₽"])
+        for v in villages:
+            for item in village_basket(v, params):
+                revenue = round(item["cost"] * (1 + params.margin), 2)
+                w.writerow([v.name, v.district, v.place_type, v.population,
+                            item["category"], item["product"], item["qty"],
+                            item["unit"], revenue])
+ 
+ 
+def print_summary(rows: list[dict], villages: list[Village],
+                  params: BasketParams) -> None:
+    total_weight = sum(r["weight"] for r in rows)
+    total_cost = sum(r["cost"] for r in rows)
+    total_revenue = sum(r["revenue"] for r in rows)
+    total_pop = sum(v.population for v in villages)
+    buyers = int(total_pop * params.reach)
+ 
+    print()
+    print(f"Маршрут: {len(villages)} деревень, ~{total_pop} жителей")
+    print(f"Покупателей ожидается: ~{buyers} ({int(params.reach*100)}%)")
+    print(f"Завоз раз в {params.frequency_days} дн., "
+          f"наценка {int(params.margin*100)}%, "
+          f"запас на порчу {int(params.waste*100)}%")
+    print("-" * 50)
+    print(f"Вес товара:       {total_weight:>8.1f} кг")
+    print(f"Закупка:          {total_cost:>8.0f} ₽")
+    print(f"Выручка:          {total_revenue:>8.0f} ₽")
+    print(f"Прибыль:          {total_revenue - total_cost:>8.0f} ₽")
+    print()
+ 
+    # Топ-10 по выручке
+    top = sorted(rows, key=lambda x: -x["revenue"])[:10]
+    print("Топ-10 товаров по выручке:")
+    for r in top:
+        print(f"  {r['product']:<28} {r['qty']:>7.1f} {r['unit']:<8} "
+              f"{r['revenue']:>8.0f} ₽")
+    print()
+ 
+    # По категориям
+    cats: dict[str, dict] = {}
+    for r in rows:
+        c = cats.setdefault(r["category"], {"weight": 0, "cost": 0, "revenue": 0})
+        c["weight"] += r["weight"]
+        c["cost"] += r["cost"]
+        c["revenue"] += r["revenue"]
+ 
+    print("По категориям:")
+    for name, c in sorted(cats.items(), key=lambda x: -x[1]["revenue"]):
+        print(f"  {name:<18} вес {c['weight']:>6.1f} кг, "
+              f"выручка {c['revenue']:>8.0f} ₽")
+ 
+ 
+def process_route(route_path: Path, out_dir: Path, params: BasketParams) -> None:
+    villages = load_route(str(route_path))
+    if not villages:
+        print(f"  {route_path.name}: пусто, пропускаем")
+        return
+ 
+    rows = total_for_van(villages, params)
+ 
+    slug = route_path.stem.replace("route_", "")
+    van_file = out_dir / f"van_load_{slug}.csv"
+    village_file = out_dir / f"per_village_{slug}.csv"
+ 
+    save_van_load(rows, van_file, villages, params)
+    save_per_village(villages, village_file, params)
+ 
+    print(f"\n>>> {route_path.name}")
+    print_summary(rows, villages, params)
+    print(f"Сохранено: {van_file}")
+    print(f"Сохранено: {village_file}")
+ 
+ 
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Считаем корзину товаров для мобильной лавки")
+    parser.add_argument("--route", help="один CSV-файл маршрута")
+    parser.add_argument("--all-routes", help="папка со всеми CSV-маршрутами")
+    parser.add_argument("--frequency", type=int, default=7,
+                        help="раз в сколько дней приезжаем (по умолч. 7)")
+    parser.add_argument("--reach", type=float, default=0.30,
+                        help="доля покупателей от 0 до 1 (по умолч. 0.30)")
+    parser.add_argument("--margin", type=float, default=0.25,
+                        help="наценка от 0 до 1 (по умолч. 0.25)")
+    parser.add_argument("--waste", type=float, default=0.10,
+                        help="запас на порчу (по умолч. 0.10)")
+    parser.add_argument("--out", default="basket_output",
+                        help="папка для выходных файлов")
+    args = parser.parse_args()
+ 
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+ 
+    params = BasketParams(
+        frequency_days=args.frequency,
+        reach=args.reach,
+        margin=args.margin,
+        waste=args.waste,
+    )
+ 
+    if args.all_routes:
+        folder = Path(args.all_routes)
+        files = sorted(folder.glob("route_*.csv"))
+        if not files:
+            files = sorted(folder.glob("*.csv"))
+        if not files:
+            print(f"В папке {folder} нет CSV-файлов")
+            return
+        print(f"Найдено маршрутов: {len(files)}")
+        for f in files:
+            process_route(f, out_dir, params)
+    elif args.route:
+        process_route(Path(args.route), out_dir, params)
+    else:
+        print("Укажите --route файл.csv или --all-routes папка/")
+ 
+ 
+if __name__ == "__main__":
+    main()
+ 
