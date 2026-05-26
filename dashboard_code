@@ -1,0 +1,159 @@
+
+!pip install dash plotly pyngrok --quiet
+
+
+import csv, math, time
+from dataclasses import dataclass
+
+import dash
+from dash import dcc, html, dash_table, Input, Output, State
+import plotly.graph_objects as go
+from pyngrok import ngrok
+
+
+
+INPUT_CSV      = "osm_villages_raw.csv"
+FREQUENCY_DAYS = 7
+REACH          = 0.30
+MARGIN         = 0.25
+WASTE          = 0.10
+
+
+
+
+POP_BY_TYPE = {"village": 80, "hamlet": 15, "isolated_dwelling": 3}
+
+REGION_COLORS = [
+    "#0f766e", "#2563eb", "#7c3aed",
+    "#b45309", "#be123c", "#059669",
+]
+
+
+
+
+@dataclass
+class Product:
+    name: str
+    category: str
+    annual: float
+    unit: str
+    price: float
+    weight: float
+    rural: float = 1.0
+
+    @property
+    def adjusted_annual(self):
+        return self.annual * self.rural
+
+
+BASKET = [
+    Product("Хлеб ржано-пшеничный",    "Хлеб и крупы", 95,  "буханка", 45,  0.6,  rural=1.0),
+    Product("Мука пшеничная",          "Хлеб и крупы", 9,   "кг",      55,  1.0,  rural=0.7),
+    Product("Макароны",                "Хлеб и крупы", 6,   "кг",      90,  0.5,  rural=1.0),
+    Product("Гречка",                  "Хлеб и крупы", 4,   "кг",      110, 0.9,  rural=1.0),
+    Product("Рис",                     "Хлеб и крупы", 4,   "кг",      95,  0.9,  rural=1.0),
+    Product("Пшено / овсянка",         "Хлеб и крупы", 3,   "кг",      75,  0.9,  rural=1.0),
+    Product("Сахар",                   "Хлеб и крупы", 24,  "кг",      70,  1.0,  rural=1.0),
+    Product("Соль",                    "Хлеб и крупы", 4,   "кг",      25,  1.0,  rural=1.0),
+    Product("Молоко 2.5% (1л)",        "Молочное", 80,  "л",  75,  1.03, rural=0.5),
+    Product("Кефир (0.9л)",            "Молочное", 18,  "шт", 80,  0.93, rural=0.7),
+    Product("Сметана (350г)",          "Молочное", 12,  "шт", 95,  0.35, rural=0.7),
+    Product("Tворог (200г)",           "Молочное", 15,  "шт", 85,  0.20, rural=0.7),
+    Product("Сыр",                     "Молочное", 4,   "кг", 650, 1.0,  rural=0.8),
+    Product("Масло сливочное (180г)",  "Молочное", 18,  "шт", 180, 0.18, rural=0.9),
+    Product("Курица",                  "Мясо и рыба", 13,  "кг", 280, 1.5,  rural=0.7),
+    Product("Колбаса варёная",         "Мясо и рыба", 5,   "кг", 450, 0.5,  rural=1.0),
+    Product("Сосиски",                 "Мясо и рыба", 4,   "кг", 420, 0.5,  rural=1.0),
+    Product("Тушёнка (325г)",          "Мясо и рыба", 8,   "шт", 180, 0.33, rural=1.1),
+    Product("Рыбные консервы",         "Мясо и рыба", 10,  "шт", 130, 0.25, rural=1.2),
+    Product("Селёдка",                 "Мясо и рыба", 6,   "шт", 150, 0.4,  rural=1.0),
+    Product("Яйцо (десяток)",          "Мясо и рыба", 24,  "шт", 110, 0.65, rural=0.5),
+    Product("Картофель",               "Овощи и фрукты", 95, "кг", 45,  1.0, rural=0.2),
+    Product("Лук",                     "Овощи и фрукты", 11, "кг", 50,  1.0, rural=0.4),
+    Product("Морковь",                 "Овощи и фрукты", 10, "кг", 55,  1.0, rural=0.4),
+    Product("Капуста",                 "Овощи и фрукты", 12, "кг", 40,  1.0, rural=0.4),
+    Product("Бананы",                  "Овощи и фрукты", 8,  "кг", 130, 1.0, rural=1.2),
+    Product("Яблоки",                  "Овощи и фрукты", 14, "кг", 120, 1.0, rural=0.5),
+    Product("Лимоны",                  "Овощи и фрукты", 2,  "кг", 220, 1.0, rural=1.0),
+    Product("Масло подсолнечное (1л)", "Бакалея", 11, "л",  140, 0.95, rural=1.0),
+    Product("Чай (100г)",              "Бакалея", 4,  "шт", 180, 0.10, rural=1.0),
+    Product("Кофе (95г)",              "Бакалея", 2,  "шт", 320, 0.10, rural=1.0),
+    Product("Печенье",                 "Бакалея", 6,  "кг", 220, 0.5,  rural=1.1),
+    Product("Конфеты",                 "Бакалея", 3,  "кг", 380, 0.5,  rural=1.0),
+    Product("Спички (10 пач.)",        "Хозтовары", 2,  "шт", 30,  0.05, rural=1.0),
+    Product("Мыло хозяйственное",      "Хозтовары", 5,  "шт", 45,  0.20, rural=1.0),
+    Product("Мыло туалетное",          "Хозтовары", 6,  "шт", 55,  0.10, rural=1.0),
+    Product("Стиральный порошок (3кг)","Хозтовары", 2,  "шт", 380, 3.0,  rural=1.0),
+    Product("Зубная паста",            "Хозтовары", 3,  "шт", 120, 0.10, rural=1.0),
+    Product("Туалетная бумага (4 рул.)","Хозтовары",10, "шт", 90,  0.30, rural=1.0),
+    Product("Батарейки AA (4 шт)",     "Хозтовары", 2,  "шт", 150, 0.10, rural=1.0),
+    Product("Бинт, пластырь, анальгин","Хозтовары", 3,  "шт", 80,  0.10, rural=1.0),
+]
+
+
+
+def load_osm_csv(path):
+    points = []
+    with open(path, encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            try:
+                lat = float(row["@lat"])
+                lon = float(row["@lon"])
+                name = row.get("name", "").strip()
+                if not name:
+                    continue
+                points.append({
+                    "name":     name,
+                    "lat":      lat,
+                    "lon":      lon,
+                    "type":     row.get("place", ""),
+                    "region":   row.get("addr:region", ""),
+                    "district": row.get("addr:district", ""),
+                })
+            except (ValueError, KeyError):
+                continue
+    return points
+
+
+def haversine(a, b):
+    R = 6371.0
+    dlat = math.radians(b["lat"] - a["lat"])
+    dlon = math.radians(b["lon"] - a["lon"])
+    h = (math.sin(dlat/2)**2 +
+         math.cos(math.radians(a["lat"])) *
+         math.cos(math.radians(b["lat"])) *
+         math.sin(dlon/2)**2)
+    return R * 2 * math.atan2(math.sqrt(h), math.sqrt(1 - h))
+
+
+def route_length(route):
+    return sum(haversine(route[i], route[i+1]) for i in range(len(route)-1))
+
+
+def nearest_neighbor(points, start_idx=0):
+    n = len(points)
+    visited = [False] * n
+    route = [points[start_idx]]
+    visited[start_idx] = True
+    for _ in range(n-1):
+        cur = route[-1]
+        best_d, best_j = math.inf, -1
+        for j in range(n):
+            if not visited[j]:
+                d = haversine(cur, points[j])
+                if d < best_d:
+                    best_d, best_j = d, j
+        visited[best_j] = True
+        route.append(points[best_j])
+    return route
+
+
+def find_best_route(points):
+    step = max(1, len(points) // 8)
+    best_route, best_dist = None, math.inf
+    for s in range(0, len(points)):
+        r = nearest_neighbor(points, start_idx=s)
+        d = route_length(r)
+        if d < best_dist:
+            best_dist, best_route = d, r
+    return best_route
